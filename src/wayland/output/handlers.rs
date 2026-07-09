@@ -73,12 +73,17 @@ where
                 flags |= WMode::Preferred;
             }
             let data = output.data::<OutputUserData>().unwrap();
-            output.mode(
-                flags,
-                mode.size.w,
-                mode.size.h,
-                data.mode_refresh_for(&output, mode.refresh),
-            );
+            let (
+                w,
+                h,
+                refresh,
+            ) = data
+                .mode_event_for(
+                    &output,
+                    mode,
+                    inner.scale,
+                );
+            output.mode(flags, w, h, refresh);
         }
 
         if output.version() >= 4 {
@@ -87,7 +92,20 @@ where
         }
 
         if output.version() >= 2 {
-            output.scale(inner.scale.integer_scale());
+            let data = output
+                .data::<
+                    OutputUserData
+                >()
+                .unwrap();
+            output
+                .scale(
+                    data
+                        .scale_event_for(
+                            &output,
+                            inner.scale
+                                .integer_scale(),
+                        ),
+                );
             output.done();
         }
 
