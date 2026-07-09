@@ -409,11 +409,20 @@ impl Output {
             let scale_changed = client_scale != data.last_client_scale.swap(client_scale, Ordering::AcqRel);
 
             if let Some(mode) = new_mode {
+                let (
+                    w,
+                    h,
+                    refresh,
+                ) = data.mode_event_for(
+                    &output,
+                    mode,
+                    inner.scale,
+                );
                 output.mode(
                     flags,
-                    mode.size.w,
-                    mode.size.h,
-                    data.mode_refresh_for(&output, mode.refresh),
+                    w,
+                    h,
+                    refresh,
                 );
             }
             if new_transform.is_some() || new_location.is_some() {
@@ -421,7 +430,13 @@ impl Output {
             }
             if (new_scale.is_some() || scale_changed) && output.version() >= 2 {
                 let scale = (inner.scale.integer_scale() as f64 / client_scale).max(1.).ceil() as i32;
-                output.scale(scale);
+                output.scale(
+                    data
+                        .scale_event_for(
+                            &output,
+                            scale,
+                        ),
+                );
             }
             if output.version() >= 2 {
                 output.done();
