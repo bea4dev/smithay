@@ -104,16 +104,39 @@ pub struct OutputManagerState {
     xdg_output_manager: Option<GlobalId>,
 }
 
-/// Callback used to override the refresh rate advertised in `wl_output.mode`.
+/// Callback used to override the `wl_output` state advertised to a client.
 ///
-/// The callback is evaluated for each client that binds a `wl_output`. Returning `None`
-/// preserves the output's physical mode refresh. Returning `Some(refresh)` makes only that
-/// client observe the provided refresh, in mHz, for the advertised mode.
+/// The callback is evaluated for each client that binds a `wl_output` and each time state is
+/// re-sent.
 ///
-/// Most compositors should not need this. It is intended for compatibility layers such as
-/// Xwayland, where a single Wayland client can represent windows on multiple outputs while the
-/// X11 Present/RandR side still exposes one representative refresh rate.
-pub type ModeRefreshOverride = dyn Fn(&Client) -> Option<i32> + Send + Sync + 'static;
+/// `None`: preserves the output's physical state.
+/// `Some(ClientOutputOverride)`: applies the override for that client only.
+///
+/// Most compositors should not need this. It is intended for compatibility layers where a single
+/// Wayland client represents windows on multiple outputs and mirrors `wl_output` data into RandR
+/// at face value.
+///
+/// Required by:
+///
+/// Xwayland
+/// Xwayland-satellite
+pub type ModeRefreshOverride = dyn Fn(&Client) -> Option<ClientOutputOverride> + Send + Sync + 'static;
+
+/// Per-client overrides of the state a `wl_output` global advertises.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct ClientOutputOverride {
+    /// Synthesized refresh in mHz. `None` reports the physical refresh.
+    pub refresh_mhz: Option<i32>,
+    /// Advertise every mode at the output's *logical* size (physical size divided by the
+    /// output scale) and report `wl_output.scale` as 1.
+    ///
+    /// This makes the client's coordinate world identical to the compositor's logical layout.
+    /// X11 bridges mirror `wl_output.mode` into RandR at face value while taking positions from
+    /// `xdg_output` (logical), so on fractionally scaled outputs they would otherwise construct
+    /// an overlapping, skewed X11 screen — visible as offset pointer input in X11 clients.
+    pub normalize_to_logical: bool,
+}
+
 
 /// Internal data of a wl_output global
 pub struct WlOutputData {
@@ -198,11 +221,52 @@ impl Clone for OutputUserData {
 }
 
 impl OutputUserData {
-    pub(crate) fn mode_refresh_for(&self, output: &WlOutput, fallback: i32) -> i32 {
+    pub(crate) fn client_override_for(&self, output: &WlOutput) -> Option<ClientOutputOverride> {
         self.mode_refresh_override
             .as_ref()
             .and_then(|override_fn| output.client().and_then(|client| override_fn(&client)))
-            .unwrap_or(fallback)
+    }
+
+    /// The `(width, height, refresh)` to advertise for `mode` on this instance, honoring the
+    /// per-client override. `scale` is the output's current scale, used when normalizing the
+    /// mode to logical size.
+    pub(crate) fn mode_event_for(&self, output: &WlOutput, mode: Mode, scale: Scale) -> (i32, i32, i32) {
+        match self.client_override_for(output) {
+            Some(client_override) => {
+                let (w, h) = if client_override.normalize_to_logical {
+                    let factor = scale.fractional_scale();
+                    (
+                        ((mode.size.w as f64 / factor).round() as i32).max(1),
+                        ((mode.size.h as f64 / factor).round() as i32).max(1),
+                    )
+                } else {
+                    (mode.size.w, mode.size.h)
+                };
+                (
+                    w,
+                    h,
+                    client_override.refresh_mhz
+                        .unwrap_or(
+                            mode.refresh
+                        ),
+                )
+            }
+            None => (mode.size.w, mode.size.h, mode.refresh),
+        }
+    }
+
+    /// The `wl_output.scale` value to advertise on this instance.
+    pub(crate) fn scale_event_for(&self, output: &WlOutput, scale: i32) -> i32 {
+        if self
+            .client_override_for(output)
+            .is_some_and(
+                |client_override| client_override.normalize_to_logical
+            )
+        {
+            1
+        } else {
+            scale
+        }
     }
 }
 
@@ -261,9 +325,11 @@ impl Output {
     /// by that compatibility client while all regular clients continue to see the physical output
     /// mode unchanged.
     ///
-    /// The callback is evaluated whenever Smithay sends `wl_output.mode` for this global. Return
-    /// `None` for normal clients or when the physical refresh should be reported. Return
-    /// `Some(refresh)` to report a synthesized refresh in mHz for that client.
+    /// The callback is evaluated whenever Smithay sends `wl_output` state for this global.
+    ///
+    /// `None`: normal clients
+    /// `Some(ClientOutputOverride)`: synthesizes refresh and/or normalize mode sizes and scale
+    /// to the logical coordinate space for that client (see [`ClientOutputOverride`]).
     ///
     /// If the override value changes without a physical output state change, call
     /// [`Output::change_current_state`] with the current mode to re-send the mode event.
@@ -275,9 +341,18 @@ impl Output {
     where
         D: GlobalDispatch<WlOutput, WlOutputData>,
         D: 'static,
-        F: Fn(&Client) -> Option<i32> + Send + Sync + 'static,
+        F: Fn(&Client) -> Option<
+            ClientOutputOverride
+        > + Send + Sync + 'static,
     {
-        self.create_global_internal::<D>(display, Some(Arc::new(mode_refresh_override)))
+        self.create_global_internal::<D>(
+            display,
+            Some(
+                Arc::new(
+                    mode_refresh_override,
+                )
+            ),
+        )
     }
 
     fn create_global_internal<D>(
