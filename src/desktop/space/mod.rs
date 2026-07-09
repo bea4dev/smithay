@@ -424,6 +424,35 @@ impl<E: SpaceElement + PartialEq> Space<E> {
     /// wayland socket flush.
     #[profiling::function]
     pub fn refresh(&mut self) {
+        self
+            .refresh_with_output_filter(
+                |_,
+                 _| true,
+            );
+    }
+
+    /// Like [`Space::refresh`], but consults `filter` before treating an element as
+    /// overlapping an output: when `filter(element, output)` returns `false`, the
+    /// element is considered absent from that output regardless of its bounding box,
+    /// generating an `output_leave` if it had previously entered.
+    ///
+    /// Compositors whose elements are only ever presented on a known set of outputs
+    /// (e.g. workspace-scrolling layouts, where an element's stale or animated bbox
+    /// can sweep across a neighbouring monitor it is never actually shown on) can use
+    /// this to keep `wl_surface.enter/leave` in sync with what is really displayed.
+    /// This matters for clients that act on enter events, such as xwayland-satellite,
+    /// which re-anchors its X11 screen coordinates on every enter it receives.
+    #[profiling::function]
+    pub fn refresh_with_output_filter<F>(
+        &mut self, 
+        mut filter: F,
+    )
+    where
+        F: FnMut(
+            &E,
+            &Output,
+        ) -> bool,
+    {
         self.elements.retain(|e| e.alive());
 
         let outputs = self
@@ -440,7 +469,12 @@ impl<E: SpaceElement + PartialEq> Space<E> {
 
             for (output, output_geometry) in &outputs {
                 // Check if the bounding box of the toplevel intersects with the output
-                if let Some(mut overlap) = output_geometry.intersection(bbox) {
+                let overlap = if filter(&e.element, output) {
+                    output_geometry.intersection(bbox)
+                } else {
+                    None
+                };
+                if let Some(mut overlap) = overlap {
                     // output_enter expects the overlap to be relative to the element
                     overlap.loc -= bbox.loc;
                     let old = e.outputs.insert(output.clone(), overlap);
