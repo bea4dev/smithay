@@ -143,8 +143,8 @@ use crate::{
         xwayland_shell::{self, XWaylandShellHandler},
     },
 };
-use atomic_float::AtomicF64;
 use calloop::{Interest, LoopHandle, Mode, PostAction, generic::Generic, ping};
+use portable_atomic::AtomicF64;
 use rustix::fs::OFlags;
 use std::{
     cell::RefCell,
@@ -167,6 +167,7 @@ pub use x11rb::protocol::xproto::Window as X11Window;
 use x11rb::{
     connection::Connection as _,
     errors::{ReplyError, ReplyOrIdError},
+    properties::{WmHints, WmHintsState},
     protocol::{
         Event,
         composite::{ConnectionExt as _, Redirect},
@@ -187,6 +188,8 @@ use x11rb::{
 };
 
 mod dnd;
+mod mwm;
+pub use self::mwm::*;
 pub mod settings;
 use settings::{NameError, Value, XSettings};
 mod selection;
@@ -1669,6 +1672,15 @@ where
                             for atom in states {
                                 state_lock.net_state.insert(atom);
                             }
+                        }
+                    }
+
+                    if let Ok(Some(hints)) = WmHints::get(&*conn, win)?.reply_unchecked() {
+                        let mut state = surface.state.lock().unwrap();
+                        if matches!(hints.initial_state, Some(WmHintsState::Iconic)) {
+                            state.net_state.insert(xwm.atoms._NET_WM_STATE_HIDDEN);
+                        } else {
+                            state.net_state.remove(&xwm.atoms._NET_WM_STATE_HIDDEN);
                         }
                     }
 

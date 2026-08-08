@@ -111,7 +111,7 @@
 //! Once the seat is initialized, you can add capabilities to it.
 //!
 //! Currently, pointer, touch and keyboard capabilities are supported by this module.
-//! [`tablet_manager`](crate::wayland::tablet_manager) also provides client interaction for drawing tablets.
+//! [`tablet`] provides similar abstractions for drawing tablets.
 //!
 //! You can add these capabilities via methods of the [`Seat`] struct:
 //! [`Seat::add_keyboard`], [`Seat::add_pointer`] and [`Seat::add_touch`].
@@ -137,15 +137,19 @@ use self::{
     pointer::{CursorImageStatus, PointerHandle, PointerTarget},
     touch::TouchGrab,
 };
-use crate::utils::{Serial, user_data::UserDataMap};
+use crate::{
+    input::pointer::{ClickGrab, GrabStartData as PointerGrabStartData, PointerGrab},
+    utils::{Serial, user_data::UserDataMap},
+};
 
 pub mod dnd;
 pub mod keyboard;
 pub mod pointer;
+pub mod tablet;
 pub mod touch;
 
 /// Handler trait for Seats
-pub trait SeatHandler: Sized {
+pub trait SeatHandler: Sized + 'static {
     /// Type used to represent the target currently holding the keyboard focus
     type KeyboardFocus: KeyboardTarget<Self> + PartialEq + Clone + 'static;
     /// Type used to represent the target currently holding the pointer focus
@@ -164,6 +168,15 @@ pub trait SeatHandler: Sized {
 
     /// Callback that will be notified whenever the keyboard led state changes.
     fn led_state_changed(&mut self, _seat: &Seat<Self>, _led_state: LedState) {}
+
+    /// Provides the implicit pointer grab for clicks
+    ///
+    /// When the user presses a pointer button, an implicit pointer grab is installed. If your
+    /// compositor needs custom behavior for this grab, you can implement this trait item and
+    /// return your own [`PointerGrab`] implementation.
+    fn click_grab(&mut self, start_data: PointerGrabStartData<Self>) -> impl PointerGrab<Self> {
+        ClickGrab::new(start_data)
+    }
 }
 /// Delegate type for all [Seat] globals.
 ///
