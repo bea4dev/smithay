@@ -2050,7 +2050,7 @@ impl GlesRenderer {
             let matrix = output_projection(output_size, Transform::Normal);
             let mut tex_matrix = build_texture_mat(src, dest, source.size(), Transform::Normal);
             if source.0.y_inverted {
-                tex_matrix = Matrix3::new(1.0, 0.0, 0.0, 0.0, -1.0, 0.0, 0.0, 0.0, 1.0) * tex_matrix;
+                tex_matrix = Mat3::from_cols_array(&[1.0, 0.0, 0.0, 0.0, -1.0, 0.0, 0.0, 0.0, 1.0]) * tex_matrix;
             }
 
             self.gl.ActiveTexture(ffi::TEXTURE0);
@@ -2074,9 +2074,9 @@ impl GlesRenderer {
             self.gl.UseProgram(program.program);
             self.gl.Uniform1i(program.uniform_tex, 0);
             self.gl
-                .UniformMatrix3fv(program.uniform_matrix, 1, ffi::FALSE, matrix.as_ptr());
+                .UniformMatrix3fv(program.uniform_matrix, 1, ffi::FALSE, matrix.as_ref().as_ptr());
             self.gl
-                .UniformMatrix3fv(program.uniform_tex_matrix, 1, ffi::FALSE, tex_matrix.as_ptr());
+                .UniformMatrix3fv(program.uniform_tex_matrix, 1, ffi::FALSE, tex_matrix.as_ref().as_ptr());
             self.gl.Uniform1f(program.uniform_alpha, 1.0);
             if !self.debug_flags.is_empty() {
                 let tint = if self.debug_flags.contains(DebugFlags::TINT) {
@@ -3453,28 +3453,28 @@ impl Drop for GlesFrame<'_, '_> {
     }
 }
 
-fn output_projection(output_size: Size<i32, Physical>, transform: Transform) -> Matrix3<f32> {
+fn output_projection(output_size: Size<i32, Physical>, transform: Transform) -> Mat3 {
     // replicate https://www.khronos.org/registry/OpenGL-Refpages/gl2.1/xhtml/glOrtho.xml
     // glOrtho(0, width, 0, height, 1, 1);
-    let mut renderer = Matrix3::<f32>::identity();
-    let t = Matrix3::<f32>::identity();
+    let mut renderer = Affine2::IDENTITY;
+    let t = Affine2::IDENTITY;
     let x = 2.0 / (output_size.w as f32);
     let y = 2.0 / (output_size.h as f32);
 
     // Rotation & Reflection
-    renderer[0][0] = x * t[0][0];
-    renderer[1][0] = x * t[0][1];
-    renderer[0][1] = y * -t[1][0];
-    renderer[1][1] = y * -t[1][1];
+    renderer.x_axis.x = x * t.x_axis.x;
+    renderer.y_axis.x = x * t.x_axis.y;
+    renderer.x_axis.y = y * -t.y_axis.x;
+    renderer.y_axis.y = y * -t.y_axis.y;
 
     // Translation
-    renderer[2][0] = -(1.0f32.copysign(renderer[0][0] + renderer[1][0]));
-    renderer[2][1] = -(1.0f32.copysign(renderer[0][1] + renderer[1][1]));
+    renderer.z_axis.x = -(1.0f32.copysign(renderer.x_axis.x + renderer.y_axis.x));
+    renderer.z_axis.y = -(1.0f32.copysign(renderer.x_axis.y + renderer.y_axis.y));
 
     // We account for OpenGL's coordinate system here.
-    let flip180 = Matrix3::new(1.0, 0.0, 0.0, 0.0, -1.0, 0.0, 0.0, 0.0, 1.0);
+    let flip180 = Affine2::from_cols_array(&[1.0, 0.0, 0.0, -1.0, 0.0, 0.0]);
 
-    flip180 * transform.matrix() * renderer
+    (flip180 * transform.matrix() * renderer).into()
 }
 
 fn build_texture_mat(
