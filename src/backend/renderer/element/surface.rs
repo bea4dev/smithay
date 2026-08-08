@@ -416,15 +416,22 @@ impl<R: Renderer + ImportAll> Element for WaylandSurfaceRenderElement<R> {
             return OpaqueRegions::default();
         }
 
+        // Opaque regions may only ever shrink when quantized to the pixel
+        // grid: a claimed pixel culls everything rendered beneath it, so
+        // claiming a pixel the surface does not fully cover paints whatever
+        // is left in the framebuffer (usually the clear color) through the
+        // surface's anti-aliased edge. Rounding to nearest over-claimed by
+        // up to half a pixel at fractional scales, which showed up as a
+        // 1-physical-px black line along one window edge of GTK4 clients at
+        // e.g. scale 1.5 (GTK4 derives the surface opaque region from opaque
+        // widget areas, so the same line also appeared around buttons inside
+        // layer-shell bars). Mirror the destination transform used by
+        // `damage_since` above, but round inward (`to_i32_down`) instead.
+        let dst_size = self.size(scale);
+        let surface_scale = dst_size.to_f64() / self.view.dst.to_f64().to_physical(scale);
         self.opaque_regions
             .iter()
-            .map(|r| {
-                let loc = r.loc.to_physical_precise_round(scale);
-                let size = ((r.size.to_f64().to_physical(scale).to_point() + self.location).to_i32_round()
-                    - self.location.to_i32_round())
-                .to_size();
-                Rectangle::new(loc, size)
-            })
+            .map(|r| r.to_f64().to_physical(surface_scale * scale).to_i32_down())
             .collect::<OpaqueRegions<_, _>>()
     }
 
