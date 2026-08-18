@@ -21,13 +21,14 @@ use crate::{
         renderer::{Bind, Color32F, DebugFlags, Renderer, RendererSuper, Texture, element::RenderElement},
     },
     output::OutputModeSource,
+    utils::{Physical, Point},
 };
 
 use super::{
     DrmDevice, DrmError, Planes,
     compositor::{
-        DrmCompositor, FrameError, FrameFlags, FrameResult, PrimaryPlaneElement, RenderFrameError,
-        RenderFrameErrorType, RenderFrameResult,
+        CursorMoveOutcome, DrmCompositor, FrameError, FrameFlags, FrameResult, PrimaryPlaneElement,
+        RenderFrameError, RenderFrameErrorType, RenderFrameResult,
     },
     exporter::ExportFramebuffer,
 };
@@ -725,6 +726,18 @@ where
     /// `user_data` can be used to attach some data to a specific buffer and later retrieved with [`DrmCompositor::frame_submitted`]    
     pub fn queue_frame(&mut self, user_data: U) -> FrameResult<(), A, F> {
         self.with_compositor(|compositor| compositor.queue_frame(user_data))
+    }
+
+    /// Tries to move the hardware cursor plane without re-rendering.
+    ///
+    /// See [`DrmCompositor::update_cursor_position`] for the coordinate space
+    /// of `location`, the possible outcomes and the required follow-ups.
+    pub fn update_cursor_position(
+        &self,
+        location: Point<i32, Physical>,
+        user_data: U,
+    ) -> FrameResult<CursorMoveOutcome, A, F> {
+        self.with_compositor(|compositor| compositor.update_cursor_position(location, user_data))
     }
 
     /// Like [`queue_frame`](DrmOutput::queue_frame), but requests an immediate
