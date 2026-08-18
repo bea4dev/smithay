@@ -328,6 +328,25 @@ impl DrmSurface {
         }
     }
 
+    /// Returns whether the underlying driver supports immediate (async) page
+    /// flips — i.e. tearing flips via `DRM_MODE_PAGE_FLIP_ASYNC`.
+    ///
+    /// This queries `DRM_CAP_ATOMIC_ASYNC_PAGE_FLIP` for the atomic backend and
+    /// `DRM_CAP_ASYNC_PAGE_FLIP` for the legacy backend. Calling
+    /// [`page_flip`](DrmSurface::page_flip) with `tearing = true` on a device
+    /// that returns `false` here will fail at commit time, so callers should
+    /// gate tearing on this and fall back to a synced flip otherwise.
+    pub fn supports_async_page_flip(&self) -> bool {
+        let cap = match &*self.internal {
+            DrmSurfaceInternal::Atomic(_) => drm::DriverCapability::AtomicASyncPageFlip,
+            DrmSurfaceInternal::Legacy(_) => drm::DriverCapability::ASyncPageFlip,
+        };
+        self.device_fd()
+            .get_driver_capability(cap)
+            .map(|value| value != 0)
+            .unwrap_or(false)
+    }
+
     /// Tries to set Variable Refresh Rate (VRR) for the next frame.
     ///
     /// Doing so might cause [`DrmSurface::commit_pending`] to return `true`.
@@ -426,17 +445,26 @@ impl DrmSurface {
     ///
     /// This operation is not blocking and will produce a `vblank` event once swapping is done.
     /// Make sure to have the device registered in your event loop to not miss the event.
+    ///
+    /// If `tearing` is `true` the flip is submitted as an immediate (async) page
+    /// flip (`DRM_MODE_PAGE_FLIP_ASYNC`): the scanout hardware switches buffers
+    /// mid-scan instead of waiting for the next vblank, lowering latency at the
+    /// cost of a visible tear. This only succeeds for plane-compatible,
+    /// modeset-free flips on drivers that advertise async page-flip support
+    /// (see [`DrmSurface::supports_async_page_flip`]); otherwise the commit
+    /// fails and the caller should retry with `tearing = false`.
     #[profiling::function]
     pub fn page_flip<'a>(
         &self,
         planes: impl IntoIterator<Item = PlaneState<'a>>,
         event: bool,
+        tearing: bool,
     ) -> Result<(), Error> {
         match &*self.internal {
-            DrmSurfaceInternal::Atomic(surf) => surf.page_flip(planes, event),
+            DrmSurfaceInternal::Atomic(surf) => surf.page_flip(planes, event, tearing),
             DrmSurfaceInternal::Legacy(surf) => {
                 let fb = ensure_legacy_planes(self, planes)?;
-                surf.page_flip(fb, event)
+                surf.page_flip(fb, event, tearing)
             }
         }
     }

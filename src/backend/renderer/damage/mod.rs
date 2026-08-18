@@ -702,9 +702,17 @@ impl OutputDamageTracker {
             } else {
                 self.opaque_regions_index[z_index].start
             };
-            let element_geometry = element.geometry(output_scale);
-            // SAFETY: render_elements only contains elements overlapping with the output geometry
-            let intersection = element_geometry.intersection(output_geo).unwrap();
+            // The capture samples the whole capture region (geometry plus any
+            // padding the effect needs, e.g. blur kernel reach). Everything
+            // the capture reads must be redrawn below this element for the
+            // current frame — otherwise the sampled framebuffer still holds
+            // an older frame's final composite (including this element itself
+            // and anything above it) outside the damaged area, which shows up
+            // as flicker or clear-color bleed in the effect output.
+            let capture_region = element.framebuffer_capture_region(output_scale);
+            // SAFETY: render_elements only contains elements overlapping with the output
+            // geometry and the capture region always contains the geometry.
+            let capture_intersection = capture_region.intersection(output_geo).unwrap();
             let element_state = element_render_states.states.get_mut(element.id()).unwrap();
             let with_element_state = with_states
                 .as_ref()
@@ -716,16 +724,16 @@ impl OutputDamageTracker {
                     .damage
                     .iter()
                     .skip(damage_index)
-                    .any(|d| d.overlaps(intersection))
+                    .any(|d| d.overlaps(capture_intersection))
             {
                 element_state.needs_capture = true;
-                self.damage.push(intersection);
+                self.damage.push(capture_intersection);
                 // also drop all opaque regions on top, so they don't block re-drawing below the blur element
                 for region in self.opaque_regions.iter_mut().take(opaque_regions_index) {
                     // we want to leave `self.opaque_regions_index` intact,
                     // fixing it up would be very involved, so lets do the next best thing
                     // and keep at least part of the opaque region, if possible.
-                    *region = Rectangle::subtract_rect(*region, intersection)
+                    *region = Rectangle::subtract_rect(*region, capture_intersection)
                         .into_iter()
                         .next()
                         .unwrap_or_default();

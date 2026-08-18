@@ -333,7 +333,12 @@ impl LegacyDrmSurface {
 
     #[instrument(level = "trace", parent = &self.span, skip(self))]
     #[profiling::function]
-    pub fn page_flip(&self, framebuffer: framebuffer::Handle, event: bool) -> Result<(), Error> {
+    pub fn page_flip(
+        &self,
+        framebuffer: framebuffer::Handle,
+        event: bool,
+        tearing: bool,
+    ) -> Result<(), Error> {
         trace!("Queueing Page flip");
 
         if !self.active.load(Ordering::SeqCst) {
@@ -347,17 +352,18 @@ impl LegacyDrmSurface {
             *dpms = true;
         }
 
-        ControlDevice::page_flip(
-            &*self.fd,
-            self.crtc,
-            framebuffer,
-            if event {
-                PageFlipFlags::EVENT
-            } else {
-                PageFlipFlags::empty()
-            },
-            None,
-        )
+        // `tearing` requests an immediate (async) flip via
+        // `DRM_MODE_PAGE_FLIP_ASYNC`; see the atomic backend for the full
+        // constraints. The driver must advertise `DRM_CAP_ASYNC_PAGE_FLIP`.
+        let mut flags = PageFlipFlags::empty();
+        if event {
+            flags |= PageFlipFlags::EVENT;
+        }
+        if tearing {
+            flags |= PageFlipFlags::ASYNC;
+        }
+
+        ControlDevice::page_flip(&*self.fd, self.crtc, framebuffer, flags, None)
         .map_err(|source| {
             Error::Access(AccessError {
                 errmsg: "Failed to page flip",

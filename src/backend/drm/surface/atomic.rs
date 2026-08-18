@@ -869,6 +869,7 @@ impl AtomicDrmSurface {
         &self,
         planes: impl IntoIterator<Item = PlaneState<'a>>,
         event: bool,
+        tearing: bool,
     ) -> Result<(), Error> {
         if !self.active.load(Ordering::SeqCst) {
             return Err(Error::DeviceInactive);
@@ -889,20 +890,38 @@ impl AtomicDrmSurface {
             &*planes,
         )?;
 
+        // `tearing` requests an immediate (async) page flip via
+        // `DRM_MODE_PAGE_FLIP_ASYNC`, which the scanout hardware applies mid-scan
+        // instead of waiting for the next vblank — trading a visible tear line
+        // for lower latency. The driver must advertise
+        // `DRM_CAP_ATOMIC_ASYNC_PAGE_FLIP`.
+        //
+        // The kernel's async-flip check is strict: the commit may only change
+        // async-capable planes (in practice just the primary plane) and must not
+        // require a modeset. A commit that also touches the cursor or an overlay
+        // plane is rejected with EINVAL. We deliberately do NOT silently strip
+        // those planes here — doing so would leave their hardware state
+        // desynced (e.g. a stale cursor frozen on screen). Instead the caller is
+        // responsible for only requesting `tearing` on frames that touch the
+        // primary plane alone (e.g. by compositing a software cursor), and
+        // `DrmCompositor::submit` retries any rejected async flip as a synced
+        // one so a transition frame that still resets the cursor plane simply
+        // does not tear.
+        let mut flags = AtomicCommitFlags::NONBLOCK;
+        if event {
+            flags |= AtomicCommitFlags::PAGE_FLIP_EVENT;
+        }
+        if tearing {
+            flags |= AtomicCommitFlags::PAGE_FLIP_ASYNC;
+        }
+
         // .. and without `AtomicCommitFlags::AllowModeset`.
         // If we would set anything here, that would require a modeset, this would fail,
         // indicating a problem in our assumptions.
-        trace!(?planes, "Queueing page flip: {:?}", req);
+        trace!(?planes, tearing, "Queueing page flip: {:?}", req);
         let res = self
             .fd
-            .atomic_commit(
-                if event {
-                    AtomicCommitFlags::PAGE_FLIP_EVENT | AtomicCommitFlags::NONBLOCK
-                } else {
-                    AtomicCommitFlags::NONBLOCK
-                },
-                req.build()?,
-            )
+            .atomic_commit(flags, req.build()?)
             .map_err(|source| {
                 Error::Access(AccessError {
                     errmsg: "Page flip commit failed",

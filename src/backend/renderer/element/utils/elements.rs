@@ -91,6 +91,42 @@ impl<E: Element> Element for RescaleRenderElement<E> {
     fn is_framebuffer_effect(&self) -> bool {
         self.element.is_framebuffer_effect()
     }
+
+    fn framebuffer_capture_region(&self, scale: Scale<f64>) -> Rectangle<i32, Physical> {
+        capture_region_with_inner_padding(
+            self.element.geometry(scale),
+            self.element.framebuffer_capture_region(scale),
+            self.geometry(scale),
+        )
+    }
+}
+
+/// Re-applies the inner element's capture padding (the amount its capture
+/// region extends past its geometry, in physical pixels) around the wrapped
+/// geometry. Wrapper transforms move/scale/crop the geometry, but the capture
+/// padding is an absolute pixel amount chosen by the effect (e.g. blur kernel
+/// reach), so it must not be scaled or cropped away with the geometry.
+fn capture_region_with_inner_padding(
+    inner_geometry: Rectangle<i32, Physical>,
+    inner_capture: Rectangle<i32, Physical>,
+    wrapped_geometry: Rectangle<i32, Physical>,
+) -> Rectangle<i32, Physical> {
+    let left = (inner_geometry.loc.x - inner_capture.loc.x).max(0);
+    let top = (inner_geometry.loc.y - inner_capture.loc.y).max(0);
+    let right = ((inner_capture.loc.x + inner_capture.size.w)
+        - (inner_geometry.loc.x + inner_geometry.size.w))
+        .max(0);
+    let bottom = ((inner_capture.loc.y + inner_capture.size.h)
+        - (inner_geometry.loc.y + inner_geometry.size.h))
+        .max(0);
+    Rectangle::new(
+        Point::from((wrapped_geometry.loc.x - left, wrapped_geometry.loc.y - top)),
+        (
+            wrapped_geometry.size.w + left + right,
+            wrapped_geometry.size.h + top + bottom,
+        )
+            .into(),
+    )
 }
 
 impl<R: Renderer, E: RenderElement<R>> RenderElement<R> for RescaleRenderElement<E> {
@@ -290,6 +326,14 @@ impl<E: Element> Element for CropRenderElement<E> {
     fn is_framebuffer_effect(&self) -> bool {
         self.element.is_framebuffer_effect()
     }
+
+    fn framebuffer_capture_region(&self, scale: Scale<f64>) -> Rectangle<i32, Physical> {
+        capture_region_with_inner_padding(
+            self.element.geometry(scale),
+            self.element.framebuffer_capture_region(scale),
+            self.geometry(scale),
+        )
+    }
 }
 
 impl<R: Renderer, E: RenderElement<R>> RenderElement<R> for CropRenderElement<E> {
@@ -406,6 +450,14 @@ impl<E: Element> Element for RelocateRenderElement<E> {
 
     fn is_framebuffer_effect(&self) -> bool {
         self.element.is_framebuffer_effect()
+    }
+
+    fn framebuffer_capture_region(&self, scale: Scale<f64>) -> Rectangle<i32, Physical> {
+        capture_region_with_inner_padding(
+            self.element.geometry(scale),
+            self.element.framebuffer_capture_region(scale),
+            self.geometry(scale),
+        )
     }
 }
 

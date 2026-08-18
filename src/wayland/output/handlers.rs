@@ -41,6 +41,7 @@ where
                 output: self.output.downgrade(),
                 last_client_scale: AtomicF64::new(client_scale.load(Ordering::Acquire)),
                 client_scale,
+                mode_refresh_override: self.mode_refresh_override.clone(),
             },
         );
 
@@ -71,7 +72,13 @@ where
             if Some(mode) == inner.preferred_mode {
                 flags |= WMode::Preferred;
             }
-            output.mode(flags, mode.size.w, mode.size.h, mode.refresh);
+            let data = output.data::<OutputUserData>().unwrap();
+            output.mode(
+                flags,
+                mode.size.w,
+                mode.size.h,
+                data.mode_refresh_for(&output, mode.refresh),
+            );
         }
 
         if output.version() >= 4 {

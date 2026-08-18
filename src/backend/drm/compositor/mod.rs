@@ -759,11 +759,13 @@ impl<B: Buffer, F: Framebuffer> FrameState<B, F> {
         supports_fencing: bool,
         allow_partial_update: bool,
         event: bool,
+        tearing: bool,
     ) -> Result<(), crate::backend::drm::error::Error> {
         debug_assert!(!self.planes.iter().any(|(_, state)| state.needs_test));
         surface.page_flip(
             self.build_planes(surface, supports_fencing, allow_partial_update),
             event,
+            tearing,
         )
     }
 
@@ -974,6 +976,9 @@ where
 struct QueuedFrame<A: Allocator, F: ExportFramebuffer<<A as Allocator>::Buffer>, U> {
     prepared_frame: PreparedFrame<A, F>,
     user_data: U,
+    /// Request an immediate (async/tearing) page flip when this queued frame is
+    /// submitted. Ignored when the frame requires a full atomic commit.
+    tearing: bool,
 }
 
 impl<A, F, U> std::fmt::Debug for QueuedFrame<A, F, U>
@@ -2473,6 +2478,22 @@ where
     /// `user_data` can be used to attach some data to a specific buffer and later retrieved with [`DrmCompositor::frame_submitted`]
     #[profiling::function]
     pub fn queue_frame(&mut self, user_data: U) -> FrameResult<(), A, F> {
+        self.queue_frame_tearing(user_data, false)
+    }
+
+    /// Like [`queue_frame`](DrmCompositor::queue_frame), but requests an
+    /// immediate (async/tearing) page flip when `tearing` is `true`.
+    ///
+    /// The flip switches buffers mid-scan instead of waiting for vblank,
+    /// lowering latency at the cost of a visible tear. It only takes effect when
+    /// the frame can be realized as a plane-compatible, modeset-free page flip
+    /// on a driver that advertises async page-flip support (see
+    /// [`DrmCompositor::supports_async_page_flip`]); otherwise this frame is
+    /// submitted as a normal synced flip. Callers should only request tearing
+    /// for steady-state frames the client opted into (e.g. a fullscreen surface
+    /// scanning out on the primary plane).
+    #[profiling::function]
+    pub fn queue_frame_tearing(&mut self, user_data: U, tearing: bool) -> FrameResult<(), A, F> {
         if !self.surface.is_active() {
             return Err(FrameErrorType::<A, F>::DrmError(DrmError::DeviceInactive));
         }
@@ -2498,6 +2519,7 @@ where
         self.queued_frame = Some(QueuedFrame {
             prepared_frame,
             user_data,
+            tearing,
         });
         if self.pending_frame.is_none() {
             self.submit()?;
@@ -2728,17 +2750,48 @@ where
         let QueuedFrame {
             mut prepared_frame,
             user_data,
+            tearing,
         } = self.queued_frame.take().unwrap();
 
         let allow_partial_update = prepared_frame.kind == PreparedFrameKind::Partial;
         let flip = if self.surface.commit_pending() {
+            // A pending atomic commit cannot be an async flip (the kernel
+            // rejects async + modeset), so a tearing request degrades to a
+            // normal synced commit for this frame.
             prepared_frame
                 .frame
                 .commit(&self.surface, self.supports_fencing, allow_partial_update, true)
         } else {
-            prepared_frame
-                .frame
-                .page_flip(&self.surface, self.supports_fencing, allow_partial_update, true)
+            let flip = prepared_frame.frame.page_flip(
+                &self.surface,
+                self.supports_fencing,
+                allow_partial_update,
+                true,
+                tearing,
+            );
+            // An async flip can be rejected by the driver for reasons the caller
+            // cannot always predict (unsupported plane combination, a transient
+            // state that isn't async-flippable, partial driver support, ...).
+            // Rather than failing the whole frame — which would otherwise
+            // propagate up and tear down the compositor — retry this frame as a
+            // normal synced flip. The result is a single tear-free frame instead
+            // of a lost one; the atomic commit is all-or-nothing so nothing was
+            // applied by the failed async attempt.
+            if tearing && flip.is_err() {
+                tracing::debug!(
+                    error = ?flip.as_ref().err(),
+                    "async (tearing) page flip rejected by the driver; retrying as a synced flip"
+                );
+                prepared_frame.frame.page_flip(
+                    &self.surface,
+                    self.supports_fencing,
+                    allow_partial_update,
+                    true,
+                    false,
+                )
+            } else {
+                flip
+            }
         };
 
         let res = self.handle_flip(&prepared_frame, flip);
@@ -2950,6 +3003,15 @@ where
     /// Returns a reference to the underlying drm surface
     pub fn surface(&self) -> &DrmSurface {
         &self.surface
+    }
+
+    /// Returns whether the underlying driver supports immediate (async) page
+    /// flips — i.e. tearing flips requested via
+    /// [`queue_frame_tearing`](DrmCompositor::queue_frame_tearing).
+    ///
+    /// See [`DrmSurface::supports_async_page_flip`] for details.
+    pub fn supports_async_page_flip(&self) -> bool {
+        self.surface.supports_async_page_flip()
     }
 
     /// Get the format of the underlying swapchain

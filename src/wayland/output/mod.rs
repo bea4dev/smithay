@@ -104,10 +104,30 @@ pub struct OutputManagerState {
     xdg_output_manager: Option<GlobalId>,
 }
 
+/// Callback used to override the refresh rate advertised in `wl_output.mode`.
+///
+/// The callback is evaluated for each client that binds a `wl_output`. Returning `None`
+/// preserves the output's physical mode refresh. Returning `Some(refresh)` makes only that
+/// client observe the provided refresh, in mHz, for the advertised mode.
+///
+/// Most compositors should not need this. It is intended for compatibility layers such as
+/// Xwayland, where a single Wayland client can represent windows on multiple outputs while the
+/// X11 Present/RandR side still exposes one representative refresh rate.
+pub type ModeRefreshOverride = dyn Fn(&Client) -> Option<i32> + Send + Sync + 'static;
+
 /// Internal data of a wl_output global
-#[derive(Debug)]
 pub struct WlOutputData {
     output: Output,
+    mode_refresh_override: Option<Arc<ModeRefreshOverride>>,
+}
+
+impl std::fmt::Debug for WlOutputData {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WlOutputData")
+            .field("output", &self.output)
+            .field("mode_refresh_override", &self.mode_refresh_override.is_some())
+            .finish()
+    }
 }
 
 /// Events initiated by the clients interacting with outputs
@@ -145,11 +165,25 @@ impl OutputManagerState {
 }
 
 /// User data for WlOutput
-#[derive(Debug)]
 pub struct OutputUserData {
     pub(crate) output: WeakOutput,
     last_client_scale: AtomicF64,
     client_scale: Arc<AtomicF64>,
+    mode_refresh_override: Option<Arc<ModeRefreshOverride>>,
+}
+
+impl std::fmt::Debug for OutputUserData {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OutputUserData")
+            .field("output", &self.output)
+            .field(
+                "last_client_scale",
+                &self.last_client_scale.load(Ordering::Acquire),
+            )
+            .field("client_scale", &self.client_scale.load(Ordering::Acquire))
+            .field("mode_refresh_override", &self.mode_refresh_override.is_some())
+            .finish()
+    }
 }
 
 impl Clone for OutputUserData {
@@ -158,7 +192,17 @@ impl Clone for OutputUserData {
             output: self.output.clone(),
             last_client_scale: AtomicF64::new(self.last_client_scale.load(Ordering::Acquire)),
             client_scale: self.client_scale.clone(),
+            mode_refresh_override: self.mode_refresh_override.clone(),
         }
+    }
+}
+
+impl OutputUserData {
+    pub(crate) fn mode_refresh_for(&self, output: &WlOutput, fallback: i32) -> i32 {
+        self.mode_refresh_override
+            .as_ref()
+            .and_then(|override_fn| output.client().and_then(|client| override_fn(&client)))
+            .unwrap_or(fallback)
     }
 }
 
@@ -205,9 +249,55 @@ impl Output {
         D: GlobalDispatch<WlOutput, WlOutputData>,
         D: 'static,
     {
+        self.create_global_internal::<D>(display, None)
+    }
+
+    /// Create a new output global with a per-client mode refresh override.
+    ///
+    /// This is a compatibility escape hatch for clients that do not map cleanly to a single
+    /// physical output. For example, Xwayland is one Wayland client but may expose X11 windows on
+    /// several outputs; some X11 clients then pace rendering from RandR/Present using a single
+    /// representative CRTC refresh. A compositor can use this hook to synthesize the refresh seen
+    /// by that compatibility client while all regular clients continue to see the physical output
+    /// mode unchanged.
+    ///
+    /// The callback is evaluated whenever Smithay sends `wl_output.mode` for this global. Return
+    /// `None` for normal clients or when the physical refresh should be reported. Return
+    /// `Some(refresh)` to report a synthesized refresh in mHz for that client.
+    ///
+    /// If the override value changes without a physical output state change, call
+    /// [`Output::change_current_state`] with the current mode to re-send the mode event.
+    pub fn create_global_with_mode_refresh_override<D, F>(
+        &self,
+        display: &DisplayHandle,
+        mode_refresh_override: F,
+    ) -> GlobalId
+    where
+        D: GlobalDispatch<WlOutput, WlOutputData>,
+        D: 'static,
+        F: Fn(&Client) -> Option<i32> + Send + Sync + 'static,
+    {
+        self.create_global_internal::<D>(display, Some(Arc::new(mode_refresh_override)))
+    }
+
+    fn create_global_internal<D>(
+        &self,
+        display: &DisplayHandle,
+        mode_refresh_override: Option<Arc<ModeRefreshOverride>>,
+    ) -> GlobalId
+    where
+        D: GlobalDispatch<WlOutput, WlOutputData>,
+        D: 'static,
+    {
         info!(output = self.name(), "Creating new wl_output");
         self.inner.0.lock().unwrap().handle = Some(display.backend_handle().downgrade());
-        display.create_global::<D, WlOutput, _>(4, WlOutputData { output: self.clone() })
+        display.create_global::<D, WlOutput, _>(
+            4,
+            WlOutputData {
+                output: self.clone(),
+                mode_refresh_override,
+            },
+        )
     }
 
     /// Attempt to retrieve a [`Output`] from an existing resource
@@ -244,7 +334,12 @@ impl Output {
             let scale_changed = client_scale != data.last_client_scale.swap(client_scale, Ordering::AcqRel);
 
             if let Some(mode) = new_mode {
-                output.mode(flags, mode.size.w, mode.size.h, mode.refresh);
+                output.mode(
+                    flags,
+                    mode.size.w,
+                    mode.size.h,
+                    data.mode_refresh_for(&output, mode.refresh),
+                );
             }
             if new_transform.is_some() || new_location.is_some() {
                 inner.send_geometry_to(&output);

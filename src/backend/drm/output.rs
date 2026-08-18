@@ -740,6 +740,21 @@ where
         self.with_compositor(|compositor| compositor.update_cursor_position(location, user_data))
     }
 
+    /// Like [`queue_frame`](DrmOutput::queue_frame), but requests an immediate
+    /// (async/tearing) page flip when `tearing` is `true`.
+    ///
+    /// See [`DrmCompositor::queue_frame_tearing`] for the exact semantics and
+    /// constraints; gate this on [`DrmOutput::supports_async_page_flip`].
+    pub fn queue_frame_tearing(&mut self, user_data: U, tearing: bool) -> FrameResult<(), A, F> {
+        self.with_compositor(|compositor| compositor.queue_frame_tearing(user_data, tearing))
+    }
+
+    /// Returns whether the underlying driver supports immediate (async) page
+    /// flips — i.e. tearing flips. See [`DrmSurface::supports_async_page_flip`].
+    pub fn supports_async_page_flip(&self) -> bool {
+        self.with_compositor(|compositor| compositor.supports_async_page_flip())
+    }
+
     /// Commits the current frame for scan-out.
     ///
     /// If `render_frame` has not been called prior to this function or returned no damage

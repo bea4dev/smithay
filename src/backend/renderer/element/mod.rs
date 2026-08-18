@@ -566,6 +566,20 @@ pub trait Element {
     fn is_framebuffer_effect(&self) -> bool {
         false
     }
+
+    /// Region of the framebuffer sampled by `RenderElement::capture_framebuffer`.
+    ///
+    /// Defaults to the element geometry. Framebuffer effects that capture with
+    /// padding around their visible rect (e.g. blur kernels that need reach
+    /// beyond the displayed area) must report the padded rectangle here.
+    /// The damage tracker forces everything below this region to be redrawn
+    /// before the capture, so every pixel the capture samples reflects the
+    /// current frame's "scene below this element" instead of stale swapchain
+    /// content (which still contains the element itself and anything above it
+    /// from an older frame).
+    fn framebuffer_capture_region(&self, scale: Scale<f64>) -> Rectangle<i32, Physical> {
+        self.geometry(scale)
+    }
 }
 
 /// A single render element
@@ -669,6 +683,10 @@ where
 
     fn is_framebuffer_effect(&self) -> bool {
         (*self).is_framebuffer_effect()
+    }
+
+    fn framebuffer_capture_region(&self, scale: Scale<f64>) -> Rectangle<i32, Physical> {
+        (*self).framebuffer_capture_region(scale)
     }
 }
 
@@ -786,6 +804,10 @@ impl<E: Element> Element for NamespacedElement<E> {
 
     fn is_framebuffer_effect(&self) -> bool {
         self.inner.is_framebuffer_effect()
+    }
+
+    fn framebuffer_capture_region(&self, scale: Scale<f64>) -> Rectangle<i32, Physical> {
+        self.inner.framebuffer_capture_region(scale)
     }
 }
 
@@ -1107,6 +1129,19 @@ macro_rules! render_elements_internal {
                         #[$meta]
                     )*
                     Self::$body(x) => $crate::render_elements_internal!(@call is_framebuffer_effect; x)
+                ),*,
+                Self::_GenericCatcher(_) => unreachable!(),
+            }
+        }
+
+        fn framebuffer_capture_region(&self, scale: $crate::utils::Scale<f64>) -> $crate::utils::Rectangle<i32, $crate::utils::Physical> {
+            match self {
+                $(
+                    #[allow(unused_doc_comments)]
+                    $(
+                        #[$meta]
+                    )*
+                    Self::$body(x) => $crate::render_elements_internal!(@call framebuffer_capture_region; x, scale)
                 ),*,
                 Self::_GenericCatcher(_) => unreachable!(),
             }
@@ -1799,6 +1834,10 @@ where
 
     fn is_framebuffer_effect(&self) -> bool {
         self.0.is_framebuffer_effect()
+    }
+
+    fn framebuffer_capture_region(&self, scale: Scale<f64>) -> Rectangle<i32, Physical> {
+        self.0.framebuffer_capture_region(scale)
     }
 }
 
