@@ -2673,7 +2673,7 @@ where
         config.damage_clips = None;
 
         frame
-            .page_flip(&self.surface, self.supports_fencing, true, true)
+            .page_flip(&self.surface, self.supports_fencing, true, true, false)
             .map_err(FrameError::DrmError)?;
         self.pending_frame = Some(PendingFrame { frame, user_data });
         Ok(CursorMoveOutcome::Committed)
