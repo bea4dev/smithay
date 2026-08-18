@@ -627,6 +627,15 @@ impl<B: Buffer, F: Framebuffer> FrameState<B, F> {
     }
 }
 
+impl<B: Buffer, F: Framebuffer> Clone for FrameState<B, F> {
+    #[inline]
+    fn clone(&self) -> Self {
+        Self {
+            planes: self.planes.clone(),
+        }
+    }
+}
+
 impl<B: Buffer, F: Framebuffer> FrameState<B, F> {
     fn from_planes(primary_plane: plane::Handle, planes: &Planes) -> Self {
         let mut tmp = SmallVec::with_capacity(planes.overlay.len() + planes.cursor.len() + 1);
@@ -1039,6 +1048,31 @@ bitflags::bitflags! {
         /// Safe default set of flags
         const DEFAULT = Self::ALLOW_SCANOUT.bits();
     }
+}
+
+/// Outcome of [`DrmCompositor::update_cursor_position`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CursorMoveOutcome {
+    /// The CRTC was idle: a position-only atomic commit for the cursor plane
+    /// was submitted immediately. A vblank event will follow on the underlying
+    /// device; handle it exactly like a queued frame, i.e. call
+    /// [`DrmCompositor::frame_submitted`] when it arrives.
+    Committed,
+    /// A rendered frame is already staged behind the in-flight page flip; its
+    /// cursor plane position was rewritten in place, so the new position flies
+    /// with that frame without any extra commit.
+    MergedIntoQueued,
+    /// The cursor plane already targets the requested position; nothing was
+    /// submitted and no vblank event will follow.
+    AlreadyUpToDate,
+    /// A page flip is in flight and no follow-up frame is staged. Nothing was
+    /// changed — an atomic commit now would fail with `EBUSY` — so latch the
+    /// position and retry once the vblank for the in-flight flip arrives.
+    Busy,
+    /// The fast path is unavailable: the cursor is not currently on a hardware
+    /// cursor plane, a modeset/reset is pending, or VRR is active. Fall back
+    /// to a full `render_frame`/`queue_frame` cycle.
+    NotApplicable,
 }
 
 /// Composite an output using a combination of planes and rendering
@@ -2469,6 +2503,158 @@ where
             self.submit()?;
         }
         Ok(())
+    }
+
+    /// Tries to move the hardware cursor plane without re-rendering.
+    ///
+    /// `location` is the cursor element's location in output-relative physical
+    /// coordinates — the same space as `Element::location(scale)` of the
+    /// element that [`render_frame`](DrmCompositor::render_frame) previously
+    /// assigned to the cursor plane: output scale applied, cursor hotspot
+    /// already subtracted, output transform *not* applied.
+    ///
+    /// This is a latency fast path for pointer motion. A full render/queue
+    /// cycle re-renders the frame and then waits for the next vblank, while a
+    /// position-only update just rewrites the cursor plane's CRTC coordinates:
+    /// either merged into an already staged frame or, on an idle CRTC,
+    /// submitted as its own atomic commit that re-sends the current state of
+    /// all other active planes unchanged.
+    ///
+    /// `user_data` is only kept when the outcome is
+    /// [`CursorMoveOutcome::Committed`] (it becomes the value later returned
+    /// by [`frame_submitted`](DrmCompositor::frame_submitted)); for all other
+    /// outcomes it is dropped.
+    #[profiling::function]
+    pub fn update_cursor_position(
+        &mut self,
+        location: Point<i32, Physical>,
+        user_data: U,
+    ) -> FrameResult<CursorMoveOutcome, A, F> {
+        if !self.surface.is_active() {
+            return Err(FrameErrorType::<A, F>::DrmError(DrmError::DeviceInactive));
+        }
+        // After a reset (e.g. a VT switch) or with a modeset pending the
+        // tracked plane state no longer matches the hardware; only a full
+        // frame commit can recover from that.
+        if self.reset_pending || self.surface.commit_pending() {
+            return Ok(CursorMoveOutcome::NotApplicable);
+        }
+        // On a VRR display an out-of-band cursor commit triggers an immediate
+        // refresh, pinning the panel at its maximum rate. Keep cursor updates
+        // synchronized with content frames instead, matching how render_frame
+        // treats cursor-only damage under VRR.
+        if self.surface.vrr_enabled() {
+            return Ok(CursorMoveOutcome::NotApplicable);
+        }
+
+        let output_mode: Result<(Size<i32, Physical>, Scale<f64>, Transform), _> =
+            (&self.output_mode_source).try_into();
+        let Ok((current_size, _output_scale, output_transform)) = output_mode else {
+            return Ok(CursorMoveOutcome::NotApplicable);
+        };
+        // Same construction as try_assign_cursor_plane: the element location
+        // is un-transformed while the plane dst lives in CRTC coordinates.
+        let output_transform = output_transform.invert();
+        let output_size = output_transform.transform_size(current_size);
+        let plane_location_for = |plane_size: Size<i32, Physical>| {
+            output_transform.transform_point_in(location, &output_size)
+                - output_transform.transform_point_in(Point::default(), &plane_size)
+        };
+
+        let cursor_planes: SmallVec<[plane::Handle; 4]> =
+            self.planes.cursor.iter().map(|info| info.handle).collect();
+        if cursor_planes.is_empty() {
+            return Ok(CursorMoveOutcome::NotApplicable);
+        }
+
+        // Rewrites the cursor plane position inside an existing frame state.
+        // Returns `Some(true)` if the position changed, `Some(false)` if it
+        // already matched and `None` if the frame does not use a cursor plane.
+        // Position-only changes need no atomic test — the same assumption the
+        // repositioning path of try_assign_cursor_plane relies on.
+        let patch_frame = |frame: &mut CompositorFrameState<A, F>| {
+            for handle in cursor_planes.iter().copied() {
+                let Some(state) = frame.plane_state_mut(handle) else {
+                    continue;
+                };
+                let Some(config) = state.config.as_mut() else {
+                    continue;
+                };
+                let plane_location = plane_location_for(config.properties.dst.size);
+                if config.properties.dst.loc == plane_location {
+                    return Some(false);
+                }
+                config.properties.dst.loc = plane_location;
+                state.skip = false;
+                state.needs_test = false;
+                return Some(true);
+            }
+            None
+        };
+
+        // A frame that has been rendered but not reached the hardware yet can
+        // simply carry the new position with it.
+        let has_staged = self.next_frame.is_some() || self.queued_frame.is_some();
+        let mut staged = None;
+        if let Some(next) = self.next_frame.as_mut() {
+            staged = patch_frame(&mut next.frame);
+        }
+        if let Some(queued) = self.queued_frame.as_mut() {
+            let patched = patch_frame(&mut queued.prepared_frame.frame);
+            staged = match (staged, patched) {
+                (Some(true), _) | (_, Some(true)) => Some(true),
+                (Some(false), _) | (_, Some(false)) => Some(false),
+                (None, None) => None,
+            };
+        }
+        match staged {
+            Some(true) => return Ok(CursorMoveOutcome::MergedIntoQueued),
+            Some(false) => return Ok(CursorMoveOutcome::AlreadyUpToDate),
+            // A staged frame without a cursor plane is about to reconfigure
+            // the cursor (hide it, move it to the primary plane, ...); do not
+            // race it with a position commit for the old configuration.
+            None if has_staged => return Ok(CursorMoveOutcome::NotApplicable),
+            None => {}
+        }
+
+        if self.pending_frame.is_some() {
+            return Ok(CursorMoveOutcome::Busy);
+        }
+
+        // The CRTC is idle: submit a position-only commit. The cursor plane
+        // carries the new position; every other active plane re-sends its
+        // current state unchanged (partial updates that omit active planes
+        // trigger driver bugs, see build_planes).
+        let Some(cursor_plane) = cursor_planes.iter().copied().find(|handle| {
+            self.current_frame
+                .plane_state(*handle)
+                .map(|state| state.config.is_some())
+                .unwrap_or(false)
+        }) else {
+            return Ok(CursorMoveOutcome::NotApplicable);
+        };
+
+        let mut frame = self.current_frame.clone();
+        for (handle, state) in frame.planes.iter_mut() {
+            state.skip = *handle != cursor_plane;
+            state.needs_test = false;
+        }
+        let state = frame.plane_state_mut(cursor_plane).unwrap();
+        let config = state.config.as_mut().unwrap();
+        let plane_location = plane_location_for(config.properties.dst.size);
+        if config.properties.dst.loc == plane_location {
+            return Ok(CursorMoveOutcome::AlreadyUpToDate);
+        }
+        config.properties.dst.loc = plane_location;
+        // The cursor buffer itself is unchanged; damage clips from the frame
+        // that rendered it would be stale hints.
+        config.damage_clips = None;
+
+        frame
+            .page_flip(&self.surface, self.supports_fencing, true, true)
+            .map_err(FrameError::DrmError)?;
+        self.pending_frame = Some(PendingFrame { frame, user_data });
+        Ok(CursorMoveOutcome::Committed)
     }
 
     /// Commits the current frame for scan-out.
