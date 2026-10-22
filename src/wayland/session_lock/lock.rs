@@ -108,9 +108,12 @@ where
                 lock_surface.send_configure();
             }
             Request::UnlockAndDestroy => {
-                // Ensure session is locked.
+                // Ensure session is locked. A lock that was never confirmed
+                // (e.g. one the compositor refused while another client held
+                // the lock) must not unlock the session.
                 if !self.lock_status.load(Ordering::Relaxed) {
                     lock.post_error(Error::InvalidUnlock, "Session is not locked.");
+                    return;
                 }
 
                 state.lock_state().locked_outputs.clear();
