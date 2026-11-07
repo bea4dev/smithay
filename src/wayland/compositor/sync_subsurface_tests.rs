@@ -604,9 +604,9 @@ fn only_the_sibling_that_committed_gets_its_state_applied() {
     assert_eq!(h.applied_destination(second), None);
 }
 
-/// A desynchronized surface in the middle of a tree: committing the root
-/// reaches its synchronized child, which keeps its uncommitted state back
-/// while its position is applied.
+/// A desynchronized surface in the middle of a tree: its commit reaches the
+/// synchronized child below it, which keeps its uncommitted state back while
+/// its position is applied.
 #[test]
 fn desync_middle_surface_does_not_leak_uncommitted_leaf_state() {
     let mut h = Harness::new();
