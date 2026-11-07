@@ -494,6 +494,9 @@ impl SubsurfaceUserData {
     }
 }
 /// The cached state associated with a subsurface
+///
+/// This is the state owned by the parent: it is committed together with the parent's commit.
+/// Everything the subsurface itself requests is committed by the subsurface's own commit.
 #[derive(Debug)]
 pub struct SubsurfaceCachedState {
     /// Location of the top-left corner of this subsurface

@@ -193,6 +193,13 @@ impl MultiCache {
             .any(|c| (**c).as_any().is::<Mutex<CachedState<T>>>())
     }
 
+    /// Commits only the pending state of type `T`, leaving every other type untouched
+    ///
+    /// The state is stored under `commit_id` as in [`MultiCache::commit`].
+    pub(crate) fn commit_only<T: Cacheable + Send + 'static>(&self, commit_id: Serial, dh: &DisplayHandle) {
+        Cache::commit(self.find_or_insert::<T>(), Some(commit_id), dh);
+    }
+
     /// Commits the pending state, invoking Cacheable::commit()
     ///
     /// If commit_id is None, then the pending state is directly merged

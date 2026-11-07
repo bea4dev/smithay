@@ -78,6 +78,8 @@ reis = { version = "0.7.0", features = ["calloop"] }
 glam = { version = "0.33.2", default-features = false, features = ["std"] }
 
 [dev-dependencies]
+wayland-client = "0.31.14"
+wayland-protocols = { version = "0.32.13", features = ["client"] }
 clap = { version = "4", features = ["derive"] }
 criterion = { version = "0.5" }
 image = "0.25"
