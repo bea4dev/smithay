@@ -196,6 +196,11 @@ impl Harness {
         self.toplevels.push(toplevel);
     }
 
+    /// Destroy the client object of the `index`th call to [`Harness::popup`].
+    fn destroy_popup(&mut self, index: usize) {
+        self.popups[index].destroy();
+    }
+
     /// Give `surface` the popup role with `parent` as its parent.
     fn popup(&mut self, surface: usize, parent: usize) {
         let popup = self.xdg_surfaces[surface].get_popup(
@@ -330,4 +335,31 @@ fn popup_request_on_a_toplevel_keeps_the_role_error() {
         Some((xdg_wm_base::Error::Role as u32, "xdg_wm_base".to_owned()))
     );
     assert_eq!(h.created_popups(), 0);
+}
+
+/// A surface keeps the popup role after its popup was destroyed, and the popups that named it as
+/// their parent keep doing so. Making the surface a popup of one of their descendants would close a
+/// cycle through those links.
+///
+/// A client is supposed to destroy the popups on top first (`xdg_wm_base.not_the_topmost_popup`).
+/// The xdg-shell handler does not check that when a popup is destroyed (`PopupManager::cleanup`
+/// reports it afterwards, for compositors that run it), so a client can leave such links behind.
+/// If the handler starts checking, this test has to leave the links in place some other way.
+#[test]
+fn cycle_through_popup_links_that_outlive_a_popup_is_a_protocol_error() {
+    let mut h = Harness::new();
+    let root = h.surface();
+    let a = h.surface();
+    let b = h.surface();
+    let c = h.surface();
+    h.toplevel(root);
+
+    h.popup(a, root);
+    h.popup(b, a);
+    h.popup(c, b);
+    h.destroy_popup(0);
+    h.popup(a, c);
+
+    assert_eq!(h.protocol_error(), invalid_popup_parent());
+    assert_eq!(h.created_popups(), 3);
 }
