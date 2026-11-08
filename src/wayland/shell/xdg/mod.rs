@@ -155,6 +155,9 @@ pub mod dialog;
 pub(super) mod handlers;
 pub use handlers::{XdgPositionerUserData, XdgShellSurfaceUserData, XdgSurfaceUserData, XdgWmBaseUserData};
 
+#[cfg(test)]
+mod role_object_tests;
+
 /// The role of an XDG toplevel surface.
 pub const XDG_TOPLEVEL_ROLE: &str = "xdg_toplevel";
 

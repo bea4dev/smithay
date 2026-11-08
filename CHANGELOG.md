@@ -216,6 +216,10 @@ CRTC.
 XWayland now honors WM_HINTS request to map the window in IconicState(minimized). Compositors should
 check X11Surface::is_hidden() at mapping time and minimize the window appropriately.
 
+`xdg_surface.get_toplevel` and `xdg_surface.get_popup` now answer with `xdg_wm_base.role` when the `xdg_surface`
+still has a role object. Previously a second request was accepted and created a second `xdg_toplevel` or
+`xdg_popup` for the same surface.
+
 ## 0.7.0
 
 ### Breaking changes
