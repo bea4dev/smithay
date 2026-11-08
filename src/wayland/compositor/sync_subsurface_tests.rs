@@ -64,6 +64,8 @@ struct Server {
     shm: ShmState,
     /// Server side surfaces in creation order.
     surfaces: Vec<WlSurface>,
+    /// Number of times a surface commit was applied, as reported by `CompositorHandler::commit`.
+    commits: usize,
 }
 
 impl CompositorHandler for Server {
@@ -79,7 +81,9 @@ impl CompositorHandler for Server {
         self.surfaces.push(surface.clone());
     }
 
-    fn commit(&mut self, _surface: &WlSurface) {}
+    fn commit(&mut self, _surface: &WlSurface) {
+        self.commits += 1;
+    }
 }
 
 impl BufferHandler for Server {
@@ -149,6 +153,7 @@ impl Harness {
             _viewporter: ViewporterState::new::<Server>(&dh),
             shm: ShmState::new::<Server>(&dh, []),
             surfaces: Vec::new(),
+            commits: 0,
         }));
 
         let (client_end, server_end) = UnixStream::pair().unwrap();
@@ -273,6 +278,11 @@ impl Harness {
                 .current()
                 .buffer_scale
         })
+    }
+
+    /// How many surface commits the server applied so far.
+    fn applied_commits(&self) -> usize {
+        self.server.lock().unwrap().commits
     }
 
     fn server_surface(&self, index: usize) -> WlSurface {
@@ -641,11 +651,14 @@ fn set_desync_applies_cached_child_state() {
     h.set_destination(child, 64, 64);
     h.commit(child);
     assert_eq!(h.applied_destination(child), None);
+    let commits = h.applied_commits();
 
     h.subsurfaces[sub].set_desync();
     h.sync();
 
     assert_eq!(h.applied_destination(child), size(64, 64));
+    // One commit callback ran, for the child whose cached commit was applied
+    assert_eq!(h.applied_commits(), commits + 1);
 }
 
 /// Only what the client committed is cached: a request made after the last commit stays
@@ -757,10 +770,35 @@ fn set_desync_after_parent_commit_does_not_apply_pending_state() {
     h.commit(child);
     h.commit(parent);
     assert_eq!(h.applied_destination(child), size(64, 64));
+    let commits = h.applied_commits();
 
     h.set_destination(child, 150, 150);
     h.subsurfaces[sub].set_desync();
     h.sync();
 
     assert_eq!(h.applied_destination(child), size(64, 64));
+    // The parent's commit took the child's cache, so there was nothing left to apply
+    assert_eq!(h.applied_commits(), commits);
+}
+
+/// The cache of a synchronized subsurface includes what its own synchronized children committed
+/// before its last commit, so `set_desync` applies that too.
+#[test]
+fn set_desync_applies_grandchild_state_committed_before_the_childs_last_commit() {
+    let mut h = Harness::new();
+    let parent = h.surface();
+    let child = h.surface();
+    let grandchild = h.surface();
+    let sub = h.subsurface(child, parent);
+    h.subsurface(grandchild, child);
+
+    h.set_destination(grandchild, 64, 64);
+    h.commit(grandchild);
+    h.commit(child);
+    assert_eq!(h.applied_destination(grandchild), None);
+
+    h.subsurfaces[sub].set_desync();
+    h.sync();
+
+    assert_eq!(h.applied_destination(grandchild), size(64, 64));
 }
