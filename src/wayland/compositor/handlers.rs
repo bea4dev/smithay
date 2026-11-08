@@ -452,6 +452,22 @@ where
     ) {
         match request {
             wl_subcompositor::Request::GetSubsurface { id, surface, parent } => {
+                // A surface can only have one wl_subsurface object at a time, also when the parent of
+                // the first one is gone
+                let has_object = super::with_states(&surface, |states| {
+                    states
+                        .data_map
+                        .get::<SubsurfaceState>()
+                        .is_some_and(|state| state.has_object.load(Ordering::Acquire))
+                });
+                if has_object {
+                    subcompositor.post_error(
+                        wl_subcompositor::Error::BadSurface,
+                        "Surface already has a wl_subsurface object.",
+                    );
+                    return;
+                }
+
                 if let Err(AlreadyHasRole) = PrivateSurfaceData::set_parent(&surface, &parent) {
                     subcompositor
                         .post_error(wl_subcompositor::Error::BadSurface, "Surface already has a role.");
@@ -466,7 +482,13 @@ where
                 );
 
                 super::with_states(&surface, |states| {
-                    states.data_map.insert_if_missing_threadsafe(SubsurfaceState::new)
+                    states.data_map.insert_if_missing_threadsafe(SubsurfaceState::new);
+                    states
+                        .data_map
+                        .get::<SubsurfaceState>()
+                        .unwrap()
+                        .has_object
+                        .store(true, Ordering::Release);
                 });
 
                 state.new_subsurface(&surface, &parent);
@@ -523,12 +545,15 @@ impl Cacheable for SubsurfaceCachedState {
 
 pub(crate) struct SubsurfaceState {
     pub(crate) sync: AtomicBool,
+    /// Whether a `wl_subsurface` object exists for the surface
+    pub(crate) has_object: AtomicBool,
 }
 
 impl SubsurfaceState {
     fn new() -> SubsurfaceState {
         SubsurfaceState {
             sync: AtomicBool::new(true),
+            has_object: AtomicBool::new(false),
         }
     }
 }
@@ -627,12 +652,9 @@ where
     ) {
         PrivateSurfaceData::unset_parent(&self.surface);
         PrivateSurfaceData::with_states(&self.surface, |state| {
-            state
-                .data_map
-                .get::<SubsurfaceState>()
-                .unwrap()
-                .sync
-                .store(true, Ordering::Release);
+            let subsurface_state = state.data_map.get::<SubsurfaceState>().unwrap();
+            subsurface_state.sync.store(true, Ordering::Release);
+            subsurface_state.has_object.store(false, Ordering::Release);
 
             let mut guard = state.cached_state.get::<SubsurfaceCachedState>();
             *guard.pending() = Default::default();
