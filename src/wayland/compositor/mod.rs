@@ -110,6 +110,9 @@ mod handlers;
 mod transaction;
 mod tree;
 
+#[cfg(test)]
+mod sync_subsurface_tests;
+
 use std::cell::RefCell;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;

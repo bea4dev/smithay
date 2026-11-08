@@ -494,6 +494,10 @@ impl SubsurfaceUserData {
     }
 }
 /// The cached state associated with a subsurface
+///
+/// This is the state owned by the parent: for a synchronized subsurface it is committed together
+/// with the parent's commit. Everything the subsurface itself requests is committed by the
+/// subsurface's own commit.
 #[derive(Debug)]
 pub struct SubsurfaceCachedState {
     /// Location of the top-left corner of this subsurface
@@ -563,7 +567,7 @@ where
         client: &wayland_server::Client,
         subsurface: &WlSubsurface,
         request: wl_subsurface::Request,
-        _dh: &DisplayHandle,
+        dh: &DisplayHandle,
         _data_init: &mut DataInit<'_, D>,
     ) {
         match request {
@@ -604,14 +608,21 @@ where
                     .sync
                     .store(true, Ordering::Release);
             }),
-            wl_subsurface::Request::SetDesync => PrivateSurfaceData::with_states(&self.surface, |state| {
-                state
-                    .data_map
-                    .get::<SubsurfaceState>()
-                    .unwrap()
-                    .sync
-                    .store(false, Ordering::Release);
-            }),
+            wl_subsurface::Request::SetDesync => {
+                let was_sync = PrivateSurfaceData::with_states(&self.surface, |state| {
+                    state
+                        .data_map
+                        .get::<SubsurfaceState>()
+                        .unwrap()
+                        .sync
+                        .swap(false, Ordering::AcqRel)
+                });
+                // If the surface is no longer held back by its parent, its cached state is
+                // applied by this request
+                if was_sync && !is_effectively_sync(&self.surface) {
+                    PrivateSurfaceData::apply_cached_state(&self.surface, dh, state);
+                }
+            }
             wl_subsurface::Request::Destroy => {
                 // Our destructor already handles it
             }

@@ -9,7 +9,7 @@ use crate::{
 use super::{
     BufferAssignment, CompositorHandler, SurfaceAttributes, SurfaceData,
     cache::MultiCache,
-    handlers::{SurfaceUserData, is_effectively_sync},
+    handlers::{SubsurfaceCachedState, SurfaceUserData, is_effectively_sync},
     transaction::{Blocker, PendingTransaction, TransactionQueue},
 };
 use std::{
@@ -268,7 +268,13 @@ impl PrivateSurfaceData {
         }
 
         let current_txid = my_data.current_txid;
-        my_data.public_data.cached_state.commit(Some(current_txid), dh);
+        // Only the location is owned by the parent and takes effect with its commit. Everything
+        // else is owned by this surface and was already cached when it committed itself, so
+        // committing it again would apply requests the client has not committed yet.
+        my_data
+            .public_data
+            .cached_state
+            .commit_only::<SubsurfaceCachedState>(current_txid, dh);
         my_data
             .pending_transaction
             .insert_state(surface.clone(), current_txid);
@@ -312,25 +318,48 @@ impl PrivateSurfaceData {
             .insert_state(surface.clone(), current_txid);
         my_data.current_txid.0 = my_data.current_txid.0.wrapping_add(1);
         if !is_sync {
-            let client = match surface.client() {
-                Some(client) => client,
-                None => return,
-            };
-            // if we are not sync, add the transaction to the queue
-            let tx = std::mem::take(&mut my_data.pending_transaction);
-            let mut queue_guard = state.client_compositor_state(&client).queue.lock().unwrap();
-            let queue = queue_guard.get_or_insert_with(TransactionQueue::default);
-            queue.append(tx.finalize());
-            // release the mutex, as applying the transaction will try to lock it
-            std::mem::drop(my_data);
-            // trigger the queue
-            let transactions = queue.take_ready();
-            // release the queue lock
-            std::mem::drop(queue_guard);
-            // apply might call commit, which might call blocker_cleared, so we need to free the queue before applying
-            for transaction in transactions {
-                transaction.apply(dh, state)
-            }
+            Self::queue_pending_transaction(surface, my_data, dh, state);
+        }
+    }
+
+    /// Applies the state a subsurface cached while it was synchronized
+    ///
+    /// Called when the subsurface becomes effectively desynchronized: its committed state is
+    /// no longer held back by the parent. Requests made since its last commit are not part of
+    /// the cache and stay pending.
+    pub fn apply_cached_state<C: CompositorHandler + 'static>(
+        surface: &WlSurface,
+        dh: &DisplayHandle,
+        state: &mut C,
+    ) {
+        let my_data = Self::lock_user_data(surface);
+        Self::queue_pending_transaction(surface, my_data, dh, state);
+    }
+
+    fn queue_pending_transaction<C: CompositorHandler + 'static>(
+        surface: &WlSurface,
+        mut my_data: MutexGuard<'_, PrivateSurfaceData>,
+        dh: &DisplayHandle,
+        state: &mut C,
+    ) {
+        let client = match surface.client() {
+            Some(client) => client,
+            None => return,
+        };
+        // add the transaction to the queue
+        let tx = std::mem::take(&mut my_data.pending_transaction);
+        let mut queue_guard = state.client_compositor_state(&client).queue.lock().unwrap();
+        let queue = queue_guard.get_or_insert_with(TransactionQueue::default);
+        queue.append(tx.finalize());
+        // release the mutex, as applying the transaction will try to lock it
+        std::mem::drop(my_data);
+        // trigger the queue
+        let transactions = queue.take_ready();
+        // release the queue lock
+        std::mem::drop(queue_guard);
+        // apply might call commit, which might call blocker_cleared, so we need to free the queue before applying
+        for transaction in transactions {
+            transaction.apply(dh, state)
         }
     }
 
