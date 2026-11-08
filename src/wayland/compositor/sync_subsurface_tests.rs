@@ -628,3 +628,139 @@ fn desync_middle_surface_does_not_leak_uncommitted_leaf_state() {
     assert_eq!(h.applied_destination(leaf), size(32, 32));
     assert_eq!(h.applied_location(leaf), Point::from((5, 6)));
 }
+
+/// `wl_subsurface.set_desync`: if the surface's parent behaves as desynchronized, the cached
+/// state is applied by the request itself.
+#[test]
+fn set_desync_applies_cached_child_state() {
+    let mut h = Harness::new();
+    let parent = h.surface();
+    let child = h.surface();
+    let sub = h.subsurface(child, parent);
+
+    h.set_destination(child, 64, 64);
+    h.commit(child);
+    assert_eq!(h.applied_destination(child), None);
+
+    h.subsurfaces[sub].set_desync();
+    h.sync();
+
+    assert_eq!(h.applied_destination(child), size(64, 64));
+}
+
+/// Only what the client committed is cached: a request made after the last commit stays
+/// pending until the next commit of the (now desynchronized) subsurface.
+#[test]
+fn set_desync_keeps_uncommitted_child_state_pending() {
+    let mut h = Harness::new();
+    let parent = h.surface();
+    let child = h.surface();
+    let sub = h.subsurface(child, parent);
+
+    h.set_destination(child, 64, 64);
+    h.commit(child);
+    h.set_destination(child, 150, 150);
+
+    h.subsurfaces[sub].set_desync();
+    h.sync();
+    assert_eq!(h.applied_destination(child), size(64, 64));
+
+    h.commit(child);
+    assert_eq!(h.applied_destination(child), size(150, 150));
+}
+
+#[test]
+fn set_desync_applies_cached_child_buffer() {
+    let mut h = Harness::new();
+    let parent = h.surface();
+    let child = h.surface();
+    let sub = h.subsurface(child, parent);
+
+    h.attach_buffer(child, 8, 8);
+    h.commit(child);
+    assert!(!h.has_applied_buffer(child));
+
+    h.subsurfaces[sub].set_desync();
+    h.sync();
+
+    assert!(h.has_applied_buffer(child));
+}
+
+/// Control: with nothing cached, `set_desync` applies nothing.
+#[test]
+fn set_desync_without_cached_state_applies_nothing() {
+    let mut h = Harness::new();
+    let parent = h.surface();
+    let child = h.surface();
+    let sub = h.subsurface(child, parent);
+
+    h.subsurfaces[sub].set_desync();
+    h.sync();
+
+    assert_eq!(h.applied_destination(child), None);
+    assert!(!h.has_applied_buffer(child));
+}
+
+/// Control: a synchronized ancestor keeps the surface effectively synchronized, so
+/// `set_desync` does not apply its cache; the root's commit does.
+#[test]
+fn set_desync_under_synchronized_parent_leaves_cache_to_the_root_commit() {
+    let mut h = Harness::new();
+    let root = h.surface();
+    let middle = h.surface();
+    let leaf = h.surface();
+    h.subsurface(middle, root);
+    let leaf_sub = h.subsurface(leaf, middle);
+
+    h.set_destination(leaf, 64, 64);
+    h.commit(leaf);
+
+    h.subsurfaces[leaf_sub].set_desync();
+    h.sync();
+    assert_eq!(h.applied_destination(leaf), None);
+
+    h.commit(root);
+    assert_eq!(h.applied_destination(leaf), size(64, 64));
+}
+
+/// A second `set_desync` changes nothing: the surface is already desynchronized.
+#[test]
+fn repeated_set_desync_does_not_apply_pending_state() {
+    let mut h = Harness::new();
+    let parent = h.surface();
+    let child = h.surface();
+    let sub = h.subsurface(child, parent);
+
+    h.set_destination(child, 64, 64);
+    h.commit(child);
+    h.subsurfaces[sub].set_desync();
+    h.sync();
+    assert_eq!(h.applied_destination(child), size(64, 64));
+
+    h.set_destination(child, 150, 150);
+    h.subsurfaces[sub].set_desync();
+    h.sync();
+
+    assert_eq!(h.applied_destination(child), size(64, 64));
+}
+
+/// If the parent already committed the child's cached state, `set_desync` has nothing left to
+/// apply and must not apply requests that are still pending.
+#[test]
+fn set_desync_after_parent_commit_does_not_apply_pending_state() {
+    let mut h = Harness::new();
+    let parent = h.surface();
+    let child = h.surface();
+    let sub = h.subsurface(child, parent);
+
+    h.set_destination(child, 64, 64);
+    h.commit(child);
+    h.commit(parent);
+    assert_eq!(h.applied_destination(child), size(64, 64));
+
+    h.set_destination(child, 150, 150);
+    h.subsurfaces[sub].set_desync();
+    h.sync();
+
+    assert_eq!(h.applied_destination(child), size(64, 64));
+}
