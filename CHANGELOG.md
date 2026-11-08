@@ -216,6 +216,10 @@ CRTC.
 XWayland now honors WM_HINTS request to map the window in IconicState(minimized). Compositors should
 check X11Surface::is_hidden() at mapping time and minimize the window appropriately.
 
+`xdg_surface.get_popup` now answers with `xdg_wm_base.invalid_popup_parent` when the parent would make the
+popup its own ancestor, for example two surfaces that are made popups of each other. Previously the cycle
+was accepted and `find_popup_root_surface` never returned, which froze the compositor.
+
 ## 0.7.0
 
 ### Breaking changes

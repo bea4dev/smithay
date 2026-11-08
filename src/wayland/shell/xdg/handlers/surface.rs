@@ -171,6 +171,20 @@ where
                 let surface = &self.wl_surface;
                 let shell = &self.wm_base;
 
+                // A popup must not become its own ancestor. A surface with another role gets the
+                // role error below instead.
+                if let Some(parent) = &parent_surface {
+                    let can_be_popup =
+                        compositor::get_role(surface).is_none_or(|role| role == XDG_POPUP_ROLE);
+                    if can_be_popup && is_popup_ancestor_or_self(parent, surface) {
+                        shell.post_error(
+                            xdg_wm_base::Error::InvalidPopupParent,
+                            "The popup parent would make the popup its own ancestor.",
+                        );
+                        return;
+                    }
+                }
+
                 let attributes = XdgPopupSurfaceRoleAttributes {
                     parent: parent_surface,
                     server_pending: Some(PopupState {
@@ -370,5 +384,34 @@ impl IsAlive for XdgPopup {
     fn alive(&self) -> bool {
         let data: &XdgShellSurfaceUserData = self.data().unwrap();
         data.alive_tracker.alive()
+    }
+}
+
+/// Whether `candidate` is `surface` itself or one of the popups `surface` is a descendant of
+///
+/// This follows the chain of popup parents of `surface`, which ends at a surface that is not a
+/// popup. The parent of a popup is set by `get_popup`, which refuses a parent that leads back to
+/// the popup, by the layer shell, which uses a layer surface that can never be a popup, and it is
+/// cleared when the popup is destroyed. So the chain has no cycles, unless a compositor writes a
+/// cycle into the public `parent` field itself.
+fn is_popup_ancestor_or_self(surface: &wl_surface::WlSurface, candidate: &wl_surface::WlSurface) -> bool {
+    let mut current = surface.clone();
+    loop {
+        if &current == candidate {
+            return true;
+        }
+        if compositor::get_role(&current) != Some(XDG_POPUP_ROLE) {
+            return false;
+        }
+        let parent = compositor::with_states(&current, |states| {
+            states
+                .data_map
+                .get::<XdgPopupSurfaceData>()
+                .and_then(|data| data.lock().unwrap().parent.clone())
+        });
+        match parent {
+            Some(parent) => current = parent,
+            None => return false,
+        }
     }
 }
