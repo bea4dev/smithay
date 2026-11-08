@@ -740,6 +740,9 @@ impl CompositorState {
 }
 
 #[cfg(test)]
+mod subsurface_object_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 

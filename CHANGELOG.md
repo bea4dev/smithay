@@ -216,6 +216,10 @@ CRTC.
 XWayland now honors WM_HINTS request to map the window in IconicState(minimized). Compositors should
 check X11Surface::is_hidden() at mapping time and minimize the window appropriately.
 
+`wl_subcompositor.get_subsurface` now answers with `wl_subcompositor.bad_surface` when the surface still has a
+`wl_subsurface` object, also when the parent of that object has been destroyed. Previously the second request
+was accepted in that case.
+
 ## 0.7.0
 
 ### Breaking changes
