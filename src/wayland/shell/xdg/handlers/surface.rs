@@ -92,6 +92,12 @@ where
                 let surface = &self.wl_surface;
                 let shell = &self.wm_base;
 
+                // The xdg_surface can only have one role object at a time
+                if self.has_active_role.load(Ordering::Acquire) {
+                    shell.post_error(xdg_wm_base::Error::Role, "xdg_surface already has a role object.");
+                    return;
+                }
+
                 if compositor::give_role(surface, XDG_TOPLEVEL_ROLE).is_err() {
                     shell.post_error(xdg_wm_base::Error::Role, "Surface already has a role.");
                     return;
@@ -155,6 +161,13 @@ where
                 parent,
                 positioner,
             } => {
+                // The xdg_surface can only have one role object at a time
+                if self.has_active_role.load(Ordering::Acquire) {
+                    self.wm_base
+                        .post_error(xdg_wm_base::Error::Role, "xdg_surface already has a role object.");
+                    return;
+                }
+
                 let positioner_data = *positioner
                     .data::<XdgPositionerUserData>()
                     .unwrap()
