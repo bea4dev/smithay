@@ -216,6 +216,11 @@ CRTC.
 XWayland now honors WM_HINTS request to map the window in IconicState(minimized). Compositors should
 check X11Surface::is_hidden() at mapping time and minimize the window appropriately.
 
+A commit of a desynchronized parent no longer commits the pending state of its synchronized subsurfaces.
+Previously it applied requests the subsurface had not committed yet (a pending viewport, buffer scale
+or an attached buffer) and could replace the state the subsurface had committed. Only the position,
+which belongs to the parent, is committed with the parent now.
+
 ## 0.7.0
 
 ### Breaking changes

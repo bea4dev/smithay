@@ -9,7 +9,7 @@ use crate::{
 use super::{
     BufferAssignment, CompositorHandler, SurfaceAttributes, SurfaceData,
     cache::MultiCache,
-    handlers::{SurfaceUserData, is_effectively_sync},
+    handlers::{SubsurfaceCachedState, SurfaceUserData, is_effectively_sync},
     transaction::{Blocker, PendingTransaction, TransactionQueue},
 };
 use std::{
@@ -268,7 +268,13 @@ impl PrivateSurfaceData {
         }
 
         let current_txid = my_data.current_txid;
-        my_data.public_data.cached_state.commit(Some(current_txid), dh);
+        // Only the location is owned by the parent and takes effect with its commit. Everything
+        // else is owned by this surface and was already cached when it committed itself, so
+        // committing it again would apply requests the client has not committed yet.
+        my_data
+            .public_data
+            .cached_state
+            .commit_only::<SubsurfaceCachedState>(current_txid, dh);
         my_data
             .pending_transaction
             .insert_state(surface.clone(), current_txid);
