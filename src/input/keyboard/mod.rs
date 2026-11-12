@@ -1168,9 +1168,8 @@ impl<D: SeatHandler + 'static> KeyboardHandle<D> {
         };
 
         // forward to client if no keybinding is triggered.
-        // Modifiers are only sent when the shared seat state actually changed; the client
-        // resolves the following key event against them, so they must precede the key (handled
-        // in `KeyboardInnerHandle::input`).
+        // Forward changed modifiers alongside the key; `KeyboardInnerHandle::input` sends
+        // the resulting state after the key event, as required by wl_keyboard.
         let seat = self.get_seat(data);
         let mods = guard.mods_state;
         let modifiers = mods_changed.then_some(mods);
@@ -1572,12 +1571,12 @@ impl<D: SeatHandler + 'static> KeyboardInnerHandle<'_, D> {
             keycode,
         };
 
-        // Modifiers must be sent before the key event so the client resolves the key against the
-        // updated modifier state.
+        focus.key(self.seat, data, key, key_state, serial, time);
+        // wl_keyboard requires resulting modifiers after the key; sending them first makes
+        // Xwayland apply lock-key transitions twice.
         if let Some(mods) = modifiers {
             focus.modifiers(self.seat, data, mods, serial);
         }
-        focus.key(self.seat, data, key, key_state, serial, time);
     }
 
     /// Iterate over the currently pressed keys.
