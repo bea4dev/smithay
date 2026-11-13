@@ -2540,8 +2540,11 @@ where
     /// position-only update just rewrites the cursor plane's CRTC coordinates:
     /// either merged into an already staged frame or, on an idle CRTC,
     /// submitted as its own atomic commit that re-sends the current state of
-    /// all other active planes unchanged. With VRR enabled only the first is
-    /// done; an idle CRTC gets [`CursorMoveOutcome::NotApplicable`].
+    /// all other active planes unchanged.
+    ///
+    /// With VRR enabled that commit refreshes the panel by itself, up to its
+    /// maximum rate while the pointer moves. A full render for the same motion
+    /// would do the same at a higher cost, so this is left to the caller.
     ///
     /// `user_data` is only kept when the outcome is
     /// [`CursorMoveOutcome::Committed`] (it becomes the value later returned
@@ -2630,15 +2633,6 @@ where
             // race it with a position commit for the old configuration.
             None if has_staged => return Ok(CursorMoveOutcome::NotApplicable),
             None => {}
-        }
-
-        // On a VRR display an out-of-band cursor commit triggers an immediate
-        // refresh, pinning the panel at its maximum rate. Keep cursor updates
-        // synchronized with content frames instead, matching how render_frame
-        // treats cursor-only damage under VRR. Patching a staged frame (above)
-        // adds no commit of its own, so it stays available.
-        if self.surface.vrr_enabled() {
-            return Ok(CursorMoveOutcome::NotApplicable);
         }
 
         if self.pending_frame.is_some() {
